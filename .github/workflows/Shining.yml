@@ -771,7 +771,7 @@ jobs:
           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          
+
       - name: "🔧 Setup RESUKISU with SUSFS (⚡ Update to New Driver)"
         if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'resukisu'
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
@@ -781,8 +781,24 @@ jobs:
           echo "📦 Installing latest RESUKISU Driver..."
           rm -rf ./KernelSU ./drivers/kernelsu
           
+          # Clone sources directly from the repository
           git clone https://github.com/ReSukiSU/ReSukiSU.git KernelSU --depth=1
           ln -sf ../KernelSU/kernel drivers/kernelsu
+
+          # KERNELSU VERSION HACK (Fixes mismatch once and for all)
+          echo "🔧 Spoofing internal KernelSU driver version to 40790..."
+          cd KernelSU
+          git fetch --tags
+          
+          if [ -f "kernel/ksu.h" ]; then
+             sed -i 's/#define KSU_VERSION .*/#define KSU_VERSION 40790/' kernel/ksu.h
+             echo "✅ Version spoofed in ksu.h"
+          fi
+          if [ -f "kernel/Makefile" ]; then
+             sed -i 's/ccflags-y += -DKSU_VERSION=.*/ccflags-y += -DKSU_VERSION=40790/' kernel/Makefile
+             echo "✅ Version spoofed in Makefile"
+          fi
+          cd ..
 
           echo "📦 Cloning latest SUSFS (branch: gki-android13-5.15)..."
           rm -rf ./susfs4ksu
@@ -795,6 +811,7 @@ jobs:
           [ -f "susfs4ksu/kernel_patches/include/linux/susfs_def.h" ] && \
             cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
 
+          # Fix missing symbols for SUSFS + ReSukiSU compatibility
           echo "🔧 Adding missing symbols to fs/susfs.c..."
           cat >> fs/susfs.c << 'FIXEOF'
 
@@ -812,21 +829,25 @@ jobs:
           EXPORT_SYMBOL_GPL(fake_status_initialize_key);
           FIXEOF
 
+          # Apply SUSFS kernel patch
           SUSFS_PATCH="$(pwd)/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
           echo "🔧 Applying SUSFS kernel patch..."
           patch -p1 --fuzz=3 < "$SUSFS_PATCH" || true
-          
+
+          # Inject SUSFS calls into ReSukiSU source code
           echo "🔧 Injecting SUSFS calls into ReSukiSU..."
           sed -i '/#include <linux\/fs\.h>/a #include <linux/susfs.h>' KernelSU/kernel/ksu.c
           sed -i '/ksu_core_init();/a \tsusfs_init();' KernelSU/kernel/ksu.c || sed -i '/ksu_core_init(/a \tsusfs_init();' KernelSU/kernel/ksu.c
 
+          # Configure defconfig
           CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
           echo "📝 Configuring $CONFIG_FILE with latest SUSFS options..."
           
+          # Clean old KSU entries to prevent syntax duplication errors
           sed -i '/CONFIG_KSU/d' "$CONFIG_FILE"
           sed -i '/CONFIG_OVERLAY_FS/d' "$CONFIG_FILE"
           
-          cat >> "$CONFIG_FILE" << 'EOF'
+          cat >> "$CONFIG_FILE" << 'CFGEOF'
           CONFIG_KSU=y
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
@@ -851,10 +872,11 @@ jobs:
           CONFIG_KSU_SUSFS_INLINE_HOOK=y
           CONFIG_TMPFS_XATTR=y
           CONFIG_TMPFS_POSIX_ACL=y
-          EOF
+          CFGEOF
 
+          # Cleanup temporary files
           rm -rf ./susfs4ksu
-          echo "✅ Installed latest RESUKISU with SUSFS support"
+          echo "✅ Installed latest RESUKISU with SUSFS and forced 40790 version!"
           
       - name: "🔧 Setup Wild-KSU with SUSFS"
         if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'wild-ksu'
