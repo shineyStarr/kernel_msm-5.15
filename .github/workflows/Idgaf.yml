@@ -631,14 +631,14 @@ jobs:
            echo "🎉 NEXT with SUSFS Integration complete!"
 
       - name: "🔧 Setup RESUKISU with SUSFS"
-        if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'RESUKISU'
+        if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'resukisu'
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         run: |
           set -e
     
           echo "📦 Installing RESUKISU..."
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
-          echo "✔ RESUKISU installed successfully (Version: $KSU_VERSION)"
+          echo "✔ RESUKISU installed successfully"
     
           echo "📦 Cloning SUSFS4KSU..."
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
@@ -651,6 +651,23 @@ jobs:
             cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
           fi
      
+          echo "🔧 Adding missing symbols to fs/susfs.c..."
+          cat >> fs/susfs.c << 'FIXEOF'
+
+          /* === FIX: missing symbols for SUSFS + ReSukiSU === */
+          int ksu_selinux_hide_enabled = 0;
+          EXPORT_SYMBOL_GPL(ksu_selinux_hide_enabled);
+
+          void initialize_fake_status(void) { }
+          EXPORT_SYMBOL_GPL(initialize_fake_status);
+
+          void *fake_status = NULL;
+          EXPORT_SYMBOL_GPL(fake_status);
+
+          int fake_status_initialize_key = 0;
+          EXPORT_SYMBOL_GPL(fake_status_initialize_key);
+          FIXEOF
+
           # Save absolute path to patch before moving directories
           SUSFS_KERNEL_PATCH="$(pwd)/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
 
