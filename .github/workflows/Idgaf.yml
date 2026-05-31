@@ -631,7 +631,7 @@ jobs:
            echo "🎉 NEXT with SUSFS Integration complete!"
 
       - name: "🔧 Setup RESUKISU with SUSFS"
-        if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'resukisu'
+        if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'RESUKISU'
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         run: |
           set -e
