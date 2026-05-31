@@ -710,7 +710,7 @@ jobs:
           echo "✅ Installed rKSU"
 
       - name: "🔧 Setup RESUKISU with SUSFS"
-        if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'RESUKISU'
+        if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'resukisu'
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         run: |
           set -e
