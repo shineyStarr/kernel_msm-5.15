@@ -56,6 +56,7 @@ on:
           - "kernelsu"
           - "sukisu-ultra"
           - "rksu"
+          - "resukisu"
           - "wild-ksu"
           - "kowsu"
           - "mambosu"
@@ -707,6 +708,73 @@ jobs:
           EOF
           
           echo "✅ Installed rKSU"
+
+      - name: "🔧 Setup RESUKISU with SUSFS"
+        if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'RESUKISU'
+        working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
+        run: |
+          set -e
+    
+          echo "📦 Installing RESUKISU..."
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
+          echo "✔ RESUKISU installed successfully (Version: $KSU_VERSION)"
+    
+          echo "📦 Cloning SUSFS4KSU..."
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
+
+          echo "📄 Forcing SUSFS source injection..."
+          mkdir -p fs include/linux
+          cp -f susfs4ksu/kernel_patches/fs/susfs.c fs/susfs.c
+          cp -f susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/susfs.h
+          if [ -f "susfs4ksu/kernel_patches/include/linux/susfs_def.h" ]; then
+            cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
+          fi
+     
+          # Save absolute path to patch before moving directories
+          SUSFS_KERNEL_PATCH="$(pwd)/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
+
+          echo "🔧 Applying SUSFS KERNEL PATCH..."
+          if patch -p1 < "$SUSFS_KERNEL_PATCH"; then
+            echo "✅ SUSFS patch successfully applied"
+          else
+            echo "⚠️ SUSFS patch failed — common on non-GKI"
+          fi
+
+          echo "📦 Applying hide_stuff patch"
+          curl -LSs "https://raw.githubusercontent.com/nebixts/kernel_patches/main/69_hide_stuff.patch" | patch -p1 -F 3 || echo "⚠️ Hide stuff patch skipped"
+          
+          CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
+          echo "📝 Configuring $CONFIG_FILE"
+          cat >> "$CONFIG_FILE" << 'EOF'
+          CONFIG_KSU=y
+          CONFIG_KPM=n
+          CONFIG_KPROBES=y
+          CONFIG_HAVE_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          CONFIG_KSU_SUSFS_SUS_SU=y
+          EOF
+    
+          echo "✔ RESUKISU configs with SUSFS added"
+    
+          # Workspace cleaning
+          rm -rf ./susfs4oki ./kernel_patches ./SukiSU_patch
+    
+          echo "✅ Installed RESUKISU with SUSFS Successfully"
 
       - name: "🔧 Setup Wild-KSU with SUSFS"
         if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'wild-ksu'
