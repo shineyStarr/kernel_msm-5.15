@@ -199,43 +199,6 @@ jobs:
 
             echo "✅ Spoof applied successfully. Final name: $FULL_VERSION"
           fi
-            
-      - name: "🚀 Apply Performance & Stability Tweaks"
-        working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
-        run: |
-          CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
-          echo "Injecting safe performance configurations..."
-          
-          # Smoother UI
-          echo "CONFIG_LRU_GEN=y" >> "$CONFIG_FILE"
-          echo "CONFIG_LRU_GEN_ENABLED=y" >> "$CONFIG_FILE"
-          
-          # TTL Fix
-          echo "CONFIG_NETFILTER_XT_TARGET_HL=y" >> "$CONFIG_FILE"
-          echo "CONFIG_IP6_NF_TARGET_HL=y" >> "$CONFIG_FILE"
-          
-          # Battery efficiency
-          echo "CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y" >> "$CONFIG_FILE"
-
-          # [Removed ZSTD ZRAM and Debug Disable for now to ensure stability]
-          
-          echo "✅ Safe tweaks applied."
-
-      - name: "🔧 Enable SELinux Auditing"
-        working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
-        run: |
-          CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
-          echo "Enabling SELinux Auditing for better AVC logs..."
-          
-          cat >> "$CONFIG_FILE" << 'EOF'
-          CONFIG_AUDIT=y
-          CONFIG_AUDITSYSCALL=y
-          CONFIG_AUDIT_GENERIC=y
-          CONFIG_AUDIT_ARCH_COMPAT_GENERIC=y
-          CONFIG_AUDIT_COMPAT_GENERIC=y
-          EOF
-          
-          echo "✅ SELinux Auditing enabled."
           
       - name: "📥 Initialize repo"
         working-directory: ${{ env.WORK_DIR}}
@@ -714,11 +677,16 @@ jobs:
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         run: |
           set -e
+    
+          echo "📦 Installing RESUKISU..."
 
           echo "📦 Installing latest RESUKISU..."
           rm -rf ./KernelSU
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
           echo "✔ RESUKISU installed successfully"
+    
+          echo "📦 Cloning SUSFS4KSU..."
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
 
           echo "📦 Cloning latest SUSFS (branch: gki-android13-5.15)..."
           rm -rf ./susfs4ksu
@@ -728,10 +696,11 @@ jobs:
           mkdir -p fs include/linux
           cp -f susfs4ksu/kernel_patches/fs/susfs.c fs/susfs.c
           cp -f susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/susfs.h
+          if [ -f "susfs4ksu/kernel_patches/include/linux/susfs_def.h" ]; then
           [ -f "susfs4ksu/kernel_patches/include/linux/susfs_def.h" ] && \
             cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
-
-          # Критический фикс недостающих символов
+          fi
+     
           echo "🔧 Adding missing symbols to fs/susfs.c..."
           cat >> fs/susfs.c << 'FIXEOF'
 
@@ -749,106 +718,33 @@ jobs:
           EXPORT_SYMBOL_GPL(fake_status_initialize_key);
           FIXEOF
 
-          # Применение патча SUSFS
+          # Save absolute path to patch before moving directories
+          SUSFS_KERNEL_PATCH="$(pwd)/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
           SUSFS_PATCH="$(pwd)/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
           echo "🔧 Applying SUSFS kernel patch..."
           patch -p1 --fuzz=3 < "$SUSFS_PATCH" || true
 
-          # (Опционально) дополнительные патчи
+          echo "🔧 Applying SUSFS KERNEL PATCH..."
+          if patch -p1 < "$SUSFS_KERNEL_PATCH"; then
+            echo "✅ SUSFS patch successfully applied"
+          else
+            echo "⚠️ SUSFS patch failed — common on non-GKI"
+          fi
+          # patches
           curl -LSs "https://raw.githubusercontent.com/nebixts/kernel_patches/main/69_hide_stuff.patch" | patch -p1 -F 3 || true
 
-          # Конфигурация defconfig
+          echo "📦 Applying hide_stuff patch"
+          curl -LSs "https://raw.githubusercontent.com/nebixts/kernel_patches/main/69_hide_stuff.patch" | patch -p1 -F 3 || echo "⚠️ Hide stuff patch skipped"
+          
+          # Defconfig
           CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
+          echo "📝 Configuring $CONFIG_FILE"
+          cat >> "$CONFIG_FILE" << 'EOF'
           echo "📝 Configuring $CONFIG_FILE with latest SUSFS options..."
           grep -q "CONFIG_KSU=y" "$CONFIG_FILE" || {
             cat >> "$CONFIG_FILE" << 'EOF'
           CONFIG_KSU=y
-          CONFIG_KPROBES=y
-          CONFIG_HAVE_KPROBES=y
-          CONFIG_KPROBE_EVENTS=y
-          CONFIG_OVERLAY_FS=y
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-
-      - name: "🔧 Setup RESUKISU with SUSFS (⚡ Update to New Driver)"
-        if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'resukisu'
-        working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
-        run: |
-          set -e
-
-          echo "📦 Installing latest RESUKISU Driver..."
-          rm -rf ./KernelSU ./drivers/kernelsu
-          
-          # Clone sources directly from the repository
-          git clone https://github.com/ReSukiSU/ReSukiSU.git KernelSU --depth=1
-          ln -sf ../KernelSU/kernel drivers/kernelsu
-
-          # KERNELSU VERSION HACK (Fixes mismatch once and for all)
-          echo "🔧 Spoofing internal KernelSU driver version to 40790..."
-          cd KernelSU
-          git fetch --tags
-          
-          if [ -f "kernel/ksu.h" ]; then
-             sed -i 's/#define KSU_VERSION .*/#define KSU_VERSION 40790/' kernel/ksu.h
-             echo "✅ Version spoofed in ksu.h"
-          fi
-          if [ -f "kernel/Makefile" ]; then
-             sed -i 's/ccflags-y += -DKSU_VERSION=.*/ccflags-y += -DKSU_VERSION=40790/' kernel/Makefile
-             echo "✅ Version spoofed in Makefile"
-          fi
-          cd ..
-
-          echo "📦 Cloning latest SUSFS (branch: gki-android13-5.15)..."
-          rm -rf ./susfs4ksu
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 ./susfs4ksu
-
-          echo "📄 Forcing SUSFS source injection..."
-          mkdir -p fs include/linux
-          cp -f susfs4ksu/kernel_patches/fs/susfs.c fs/susfs.c
-          cp -f susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/susfs.h
-          [ -f "susfs4ksu/kernel_patches/include/linux/susfs_def.h" ] && \
-            cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
-
-          # Fix missing symbols for SUSFS + ReSukiSU compatibility
-          echo "🔧 Adding missing symbols to fs/susfs.c..."
-          cat >> fs/susfs.c << 'FIXEOF'
-
-          /* === FIX: missing symbols for SUSFS + ReSukiSU === */
-          int ksu_selinux_hide_enabled = 0;
-          EXPORT_SYMBOL_GPL(ksu_selinux_hide_enabled);
-
-          void initialize_fake_status(void) { }
-          EXPORT_SYMBOL_GPL(initialize_fake_status);
-
-          void *fake_status = NULL;
-          EXPORT_SYMBOL_GPL(fake_status);
-
-          int fake_status_initialize_key = 0;
-          EXPORT_SYMBOL_GPL(fake_status_initialize_key);
-          FIXEOF
-
-          # Apply SUSFS kernel patch
-          SUSFS_PATCH="$(pwd)/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
-          echo "🔧 Applying SUSFS kernel patch..."
-          patch -p1 --fuzz=3 < "$SUSFS_PATCH" || true
-
-          # Inject SUSFS calls into ReSukiSU source code
-          echo "🔧 Injecting SUSFS calls into ReSukiSU..."
-          sed -i '/#include <linux\/fs\.h>/a #include <linux/susfs.h>' KernelSU/kernel/ksu.c
-          sed -i '/ksu_core_init();/a \tsusfs_init();' KernelSU/kernel/ksu.c || sed -i '/ksu_core_init(/a \tsusfs_init();' KernelSU/kernel/ksu.c
-
-          # Configure defconfig
-          CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
-          echo "📝 Configuring $CONFIG_FILE with latest SUSFS options..."
-          
-          # Clean old KSU entries to prevent syntax duplication errors
-          sed -i '/CONFIG_KSU/d' "$CONFIG_FILE"
-          sed -i '/CONFIG_OVERLAY_FS/d' "$CONFIG_FILE"
-          
-          cat >> "$CONFIG_FILE" << 'CFGEOF'
-          CONFIG_KSU=y
+          CONFIG_KPM=n
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
@@ -870,13 +766,19 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_MAP=y
           CONFIG_KSU_SUSFS_SUS_SU=y
           CONFIG_KSU_SUSFS_INLINE_HOOK=y
-          CONFIG_TMPFS_XATTR=y
-          CONFIG_TMPFS_POSIX_ACL=y
-          CFGEOF
+          EOF
+    
+          echo "✔ RESUKISU configs with SUSFS added"
+    
+          # Workspace cleaning
+          rm -rf ./susfs4oki ./kernel_patches ./SukiSU_patch
+    
+          echo "✅ Installed RESUKISU with SUSFS Successfully"
+          }
 
-          # Cleanup temporary files
+          # Cleaning
           rm -rf ./susfs4ksu
-          echo "✅ Installed latest RESUKISU with SUSFS and forced 40790 version!"
+          echo "✅ Installed latest RESUKISU with SUSFS"
           
       - name: "🔧 Setup Wild-KSU with SUSFS"
         if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'wild-ksu'
