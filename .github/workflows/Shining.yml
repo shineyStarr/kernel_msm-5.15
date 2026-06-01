@@ -678,75 +678,72 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "📦 Installing ReSukiSU from 'dev' branch (latest updates)..."
+          echo "📦 Installing ReSukiSU from 'dev' branch..."
           rm -rf ./KernelSU ./drivers/kernelsu ./susfs4ksu
-
-          # Clone the dev branch directly (always latest)
           git clone --depth=1 -b dev https://github.com/ReSukiSU/ReSukiSU.git KernelSU
 
-          # Create required symlink
+          # Create Kconfig without leading spaces
+          if [ ! -f KernelSU/Kconfig ]; then
+            echo "⚠️ Creating KernelSU/Kconfig..."
+            printf '%s\n' 'menu "KernelSU Support"' > KernelSU/Kconfig
+            printf '%s\n' 'config KSU' >> KernelSU/Kconfig
+            printf '%s\n' '    tristate "KernelSU support"' >> KernelSU/Kconfig
+            printf '%s\n' '    default y' >> KernelSU/Kconfig
+            printf '%s\n' '    help' >> KernelSU/Kconfig
+            printf '%s\n' '      KernelSU root solution for Android' >> KernelSU/Kconfig
+            printf '%s\n' 'endmenu' >> KernelSU/Kconfig
+          fi
+
+          grep -q "obj-y += KernelSU/" Makefile || echo "obj-y += KernelSU/" >> Makefile
+          if ! grep -q 'source "KernelSU/Kconfig"' drivers/Kconfig; then
+            sed -i '/^endmenu/i source "KernelSU/Kconfig"' drivers/Kconfig
+          fi
+
           rm -f drivers/kernelsu
           ln -sf ../KernelSU drivers/kernelsu
 
-          # Manually apply Makefile and Kconfig modifications
-          # (normally done by setup.sh, but we do it here for completeness)
-          grep -q "obj-y += KernelSU/" Makefile || echo "obj-y += KernelSU/" >> Makefile
-          grep -q 'source "KernelSU/Kconfig"' drivers/Kconfig || \
-            sed -i '/^endmenu/i source "KernelSU/Kconfig"' drivers/Kconfig
+          echo "✔ ReSukiSU integrated"
 
-          echo "✔ ReSukiSU (dev) installed successfully"
-
-          echo "📦 Cloning SUSFS4KSU (one time)..."
+          echo "📦 Cloning SUSFS..."
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 ./susfs4ksu
 
-          echo "📄 Applying SUSFS kernel patch..."
+          echo "📄 Applying SUSFS patch..."
           SUSFS_PATCH="$(pwd)/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
-          if patch -p1 --fuzz=3 < "$SUSFS_PATCH"; then
-            echo "✅ SUSFS patch applied"
-          else
-            echo "⚠️ Patch had issues, continuing anyway"
-          fi
+          patch -p1 --fuzz=3 < "$SUSFS_PATCH" || true
 
-          echo "📄 Copying SUSFS source files..."
+          echo "📄 Copying SUSFS files..."
           mkdir -p fs include/linux
           cp -f susfs4ksu/kernel_patches/fs/susfs.c fs/susfs.c
           cp -f susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/susfs.h
           [ -f susfs4ksu/kernel_patches/include/linux/susfs_def.h ] && \
             cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
 
-          # Copy integration files if they exist
           if [ -d "susfs4ksu/kernel_patches/KernelSU/kernel" ]; then
             cp -rf susfs4ksu/kernel_patches/KernelSU/kernel/* KernelSU/kernel/
           fi
 
-          # CRITICAL: Add missing symbols to susfs.c
-          echo "🔧 Adding missing symbols to fs/susfs.c..."
-          cat >> fs/susfs.c << 'FIXEOF'
+          echo "🔧 Adding missing symbols to fs/susfs.c (no leading spaces)..."
+          # Use printf to avoid leading spaces
+          printf '\n' >> fs/susfs.c
+          printf '/* === FIX: missing symbols for SUSFS + ReSukiSU === */\n' >> fs/susfs.c
+          printf 'int ksu_selinux_hide_enabled = 0;\n' >> fs/susfs.c
+          printf 'EXPORT_SYMBOL_GPL(ksu_selinux_hide_enabled);\n' >> fs/susfs.c
+          printf '\n' >> fs/susfs.c
+          printf 'void initialize_fake_status(void) { }\n' >> fs/susfs.c
+          printf 'EXPORT_SYMBOL_GPL(initialize_fake_status);\n' >> fs/susfs.c
+          printf '\n' >> fs/susfs.c
+          printf 'void *fake_status = NULL;\n' >> fs/susfs.c
+          printf 'EXPORT_SYMBOL_GPL(fake_status);\n' >> fs/susfs.c
+          printf '\n' >> fs/susfs.c
+          printf 'int fake_status_initialize_key = 0;\n' >> fs/susfs.c
+          printf 'EXPORT_SYMBOL_GPL(fake_status_initialize_key);\n' >> fs/susfs.c
 
-          /* === FIX: missing symbols for SUSFS + ReSukiSU === */
-          int ksu_selinux_hide_enabled = 0;
-          EXPORT_SYMBOL_GPL(ksu_selinux_hide_enabled);
-
-          void initialize_fake_status(void) { }
-          EXPORT_SYMBOL_GPL(initialize_fake_status);
-
-          void *fake_status = NULL;
-          EXPORT_SYMBOL_GPL(fake_status);
-
-          int fake_status_initialize_key = 0;
-          EXPORT_SYMBOL_GPL(fake_status_initialize_key);
-          FIXEOF
-
-          # Ensure KernelSU Makefile includes susfs.o
           if ! grep -q "susfs.o" KernelSU/kernel/Makefile 2>/dev/null; then
             echo "obj-y += susfs.o" >> KernelSU/kernel/Makefile
           fi
 
-          # Update defconfig
           CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
-          echo "📝 Configuring $CONFIG_FILE with SUSFS options..."
-
-          # Remove existing KSU/SUSFS lines to avoid duplicates
+          echo "📝 Configuring $CONFIG_FILE..."
           sed -i '/^CONFIG_KSU/d' "$CONFIG_FILE"
           sed -i '/^CONFIG_KPROBES/d' "$CONFIG_FILE"
           sed -i '/^CONFIG_HAVE_KPROBES/d' "$CONFIG_FILE"
@@ -783,7 +780,7 @@ jobs:
           EOF
 
           rm -rf ./susfs4ksu
-          echo "✅ ReSukiSU (dev) with SUSFS ready for kernel 5.15"
+          echo "✅ ReSukiSU (dev) with SUSFS ready"
           
       - name: "🔧 Setup Wild-KSU with SUSFS"
         if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'wild-ksu'
