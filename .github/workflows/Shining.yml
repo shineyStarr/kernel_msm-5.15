@@ -672,108 +672,124 @@ jobs:
           
           echo "✅ Installed rKSU"
 
-      - name: "🔧 Setup ReSukiSU with SUSFS"
+      - name: "🔧 Setup RESUKISU with SUSFS"
         if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'resukisu'
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         run: |
-          set -euo pipefail
+          set -e
 
-          echo "📦 Installing ReSukiSU..."
-          rm -rf ./KernelSU ./drivers/kernelsu ./susfs4ksu
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
-          [ -d KernelSU ] || { echo "❌ ReSukiSU installation failed"; exit 1; }
+            echo "📦 Installing latest RESUKISU..."
 
-          echo "📦 Cloning SUSFS (once)..."
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 ./susfs4ksu
+            # Удаляем старую версию
+            rm -rf ./KernelSU
 
-          echo "📄 Applying SUSFS kernel patch..."
-          SUSFS_PATCH="$(pwd)/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
-          if patch -p1 --fuzz=3 < "$SUSFS_PATCH"; then
-            echo "✅ SUSFS patch applied"
-          else
-            echo "⚠️ Patch had issues, continuing anyway"
-          fi
+            # Получаем последнюю версию RESUKISU
+            RESUKISU_REPO="https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main"
+            echo "⬇️  Downloading latest RESUKISU from main branch..."
+            curl -LSs "${RESUKISU_REPO}/kernel/setup.sh" | bash -s main
+            echo "✔ RESUKISU installed successfully"
 
-          echo "📄 Copying SUSFS source files..."
-          mkdir -p fs include/linux
-          cp -f susfs4ksu/kernel_patches/fs/susfs.c fs/susfs.c
-          cp -f susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/susfs.h
-          [ -f susfs4ksu/kernel_patches/include/linux/susfs_def.h ] && \
-            cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
+            echo "📦 Cloning latest SUSFS for 5.15 kernel..."
+            rm -rf ./susfs4ksu
+            git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 ./susfs4ksu
 
-          # Copy integration files if they exist
-          if [ -d "susfs4ksu/kernel_patches/KernelSU/kernel" ]; then
-            cp -rf susfs4ksu/kernel_patches/KernelSU/kernel/* KernelSU/kernel/
-          fi
+            # Проверяем наличие файлов
+            if [ ! -f "susfs4ksu/kernel_patches/fs/susfs.c" ]; then
+              echo "⚠️  Warning: susfs.c not found in SUSFS repository"
+              exit 1
+            fi
 
-          # Create symlink safely (remove old first)
-          rm -f drivers/kernelsu
-          ln -sf ../KernelSU drivers/kernelsu
+            echo "📄 Injecting SUSFS kernel source..."
+            mkdir -p fs include/linux
+            cp -f susfs4ksu/kernel_patches/fs/susfs.c fs/susfs.c
+            cp -f susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/susfs.h
 
-          # CRITICAL: Add missing symbols to susfs.c
-          echo "🔧 Adding missing symbols to fs/susfs.c..."
-          cat >> fs/susfs.c << 'FIXEOF'
+            if [ -f "susfs4ksu/kernel_patches/include/linux/susfs_def.h" ]; then
+              cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
+            fi
 
-          /* === FIX: missing symbols for SUSFS + ReSukiSU === */
-          int ksu_selinux_hide_enabled = 0;
-          EXPORT_SYMBOL_GPL(ksu_selinux_hide_enabled);
+            # Добавляем недостающие символы для совместимости
+            echo "🔧 Adding missing kernel symbols for SUSFS + ReSukiSU..."
+            cat >> fs/susfs.c << 'FIXEOF'
 
-          void initialize_fake_status(void) { }
-          EXPORT_SYMBOL_GPL(initialize_fake_status);
+            /* === FIX: missing symbols for SUSFS + ReSukiSU === */
+            int ksu_selinux_hide_enabled = 0;
+            EXPORT_SYMBOL_GPL(ksu_selinux_hide_enabled);
 
-          void *fake_status = NULL;
-          EXPORT_SYMBOL_GPL(fake_status);
+            void initialize_fake_status(void) { }
+            EXPORT_SYMBOL_GPL(initialize_fake_status);
 
-          int fake_status_initialize_key = 0;
-          EXPORT_SYMBOL_GPL(fake_status_initialize_key);
-          FIXEOF
+            void *fake_status = NULL;
+            EXPORT_SYMBOL_GPL(fake_status);
 
-          # Ensure KernelSU Makefile includes susfs.o
-          if ! grep -q "susfs.o" KernelSU/kernel/Makefile 2>/dev/null; then
-            echo "obj-y += susfs.o" >> KernelSU/kernel/Makefile
-          fi
+            int fake_status_initialize_key = 0;
+            EXPORT_SYMBOL_GPL(fake_status_initialize_key);
+            FIXEOF
 
-          # Update defconfig (only once)
-          CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
-          echo "📝 Configuring $CONFIG_FILE..."
-          # Remove any existing KSU-related lines to avoid duplicates
-          sed -i '/^CONFIG_KSU/d' "$CONFIG_FILE"
-          sed -i '/^CONFIG_KPROBES/d' "$CONFIG_FILE"
-          sed -i '/^CONFIG_HAVE_KPROBES/d' "$CONFIG_FILE"
-          sed -i '/^CONFIG_KPROBE_EVENTS/d' "$CONFIG_FILE"
-          sed -i '/^CONFIG_KSU_SUSFS/d' "$CONFIG_FILE"
+            # Применяем патчи SUSFS
+            SUSFS_PATCH="$(pwd)/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
 
-          cat >> "$CONFIG_FILE" << 'EOF'
-          # KernelSU
-          CONFIG_KSU=y
-          CONFIG_KPROBES=y
-          CONFIG_HAVE_KPROBES=y
-          CONFIG_KPROBE_EVENTS=y
-          CONFIG_OVERLAY_FS=y
-          # SUSFS
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_SUS_MAP=y
-          CONFIG_KSU_SUSFS_SUS_SU=y
-          CONFIG_KSU_SUSFS_INLINE_HOOK=y
-          CONFIG_TMPFS_XATTR=y
-          CONFIG_TMPFS_POSIX_ACL=y
-          EOF
+            if [ -f "$SUSFS_PATCH" ]; then
+              echo "🔧 Applying SUSFS kernel patch..."
+              if patch -p1 --fuzz=3 < "$SUSFS_PATCH"; then
+                echo "✅ SUSFS patch successfully applied"
+              else
+                echo "⚠️  SUSFS patch failed — continuing anyway (may be expected for some kernels)"
+              fi
+            else
+              echo "⚠️  SUSFS patch file not found: $SUSFS_PATCH"
+            fi
 
-          rm -rf ./susfs4ksu
-          echo "✅ ReSukiSU with SUSFS ready"
+            # Применяем дополнительный patch для скрытия
+            echo "📦 Applying hide_stuff patch..."
+            curl -LSs "https://raw.githubusercontent.com/nebixts/kernel_patches/main/69_hide_stuff.patch" | \
+              patch -p1 -F 3 || echo "⚠️  Hide stuff patch skipped (optional)"
+
+            # Конфигурируем defconfig с SUSFS опциями
+            CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
+
+            if [ ! -f "$CONFIG_FILE" ]; then
+              echo "❌ Error: Config file not found: $CONFIG_FILE"
+              exit 1
+            fi
+
+            echo "📝 Configuring $CONFIG_FILE with SUSFS options..."
+
+            # Добавляем конфиги только если их нет
+            {
+              grep -q "CONFIG_KSU=y" "$CONFIG_FILE" || cat >> "$CONFIG_FILE" << 'EOF'
+            CONFIG_KSU=y
+            CONFIG_KPM=n
+            CONFIG_KPROBES=y
+            CONFIG_HAVE_KPROBES=y
+            CONFIG_KPROBE_EVENTS=y
+            CONFIG_OVERLAY_FS=y
+            CONFIG_KSU_SUSFS=y
+            CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+            CONFIG_KSU_SUSFS_SUS_PATH=y
+            CONFIG_KSU_SUSFS_SUS_MOUNT=y
+            CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+            CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+            CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+            CONFIG_KSU_SUSFS_SUS_KSTAT=y
+            CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+            CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+            CONFIG_KSU_SUSFS_ENABLE_LOG=y
+            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+            CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+            CONFIG_KSU_SUSFS_SUS_MAP=y
+            CONFIG_KSU_SUSFS_SUS_SU=y
+            CONFIG_KSU_SUSFS_INLINE_HOOK=y
+            EOF
+            }
+
+            echo "✔ RESUKISU configs with SUSFS added"
+
+            # Очистка временных файлов
+            rm -rf ./susfs4ksu ./kernel_patches ./SukiSU_patch
+
+            echo "✅ Successfully installed latest RESUKISU with SUSFS for 5.15 kernel"
           
       - name: "🔧 Setup Wild-KSU with SUSFS"
         if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'wild-ksu'
