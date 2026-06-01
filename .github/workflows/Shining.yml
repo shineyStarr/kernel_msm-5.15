@@ -672,35 +672,54 @@ jobs:
           
           echo "✅ Installed rKSU"
 
-      - name: "🔧 Setup RESUKISU with SUSFS"
+      - name: "🔧 Setup ReSukiSU with SUSFS (latest dev branch)"
         if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'resukisu'
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         run: |
-          set -e
-    
-          echo "📦 Installing RESUKISU..."
+          set -euo pipefail
 
-          echo "📦 Installing latest RESUKISU..."
-          rm -rf ./KernelSU
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
-          echo "✔ RESUKISU installed successfully"
-    
-          echo "📦 Cloning SUSFS4KSU..."
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
+          echo "📦 Installing ReSukiSU from 'dev' branch (latest updates)..."
+          rm -rf ./KernelSU ./drivers/kernelsu ./susfs4ksu
 
-          echo "📦 Cloning latest SUSFS (branch: gki-android13-5.15)..."
-          rm -rf ./susfs4ksu
+          # Clone the dev branch directly (always latest)
+          git clone --depth=1 -b dev https://github.com/ReSukiSU/ReSukiSU.git KernelSU
+
+          # Create required symlink
+          rm -f drivers/kernelsu
+          ln -sf ../KernelSU drivers/kernelsu
+
+          # Manually apply Makefile and Kconfig modifications
+          # (normally done by setup.sh, but we do it here for completeness)
+          grep -q "obj-y += KernelSU/" Makefile || echo "obj-y += KernelSU/" >> Makefile
+          grep -q 'source "KernelSU/Kconfig"' drivers/Kconfig || \
+            sed -i '/^endmenu/i source "KernelSU/Kconfig"' drivers/Kconfig
+
+          echo "✔ ReSukiSU (dev) installed successfully"
+
+          echo "📦 Cloning SUSFS4KSU (one time)..."
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 ./susfs4ksu
 
-          echo "📄 Forcing SUSFS source injection..."
+          echo "📄 Applying SUSFS kernel patch..."
+          SUSFS_PATCH="$(pwd)/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
+          if patch -p1 --fuzz=3 < "$SUSFS_PATCH"; then
+            echo "✅ SUSFS patch applied"
+          else
+            echo "⚠️ Patch had issues, continuing anyway"
+          fi
+
+          echo "📄 Copying SUSFS source files..."
           mkdir -p fs include/linux
           cp -f susfs4ksu/kernel_patches/fs/susfs.c fs/susfs.c
           cp -f susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/susfs.h
-          if [ -f "susfs4ksu/kernel_patches/include/linux/susfs_def.h" ]; then
-          [ -f "susfs4ksu/kernel_patches/include/linux/susfs_def.h" ] && \
+          [ -f susfs4ksu/kernel_patches/include/linux/susfs_def.h ] && \
             cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
+
+          # Copy integration files if they exist
+          if [ -d "susfs4ksu/kernel_patches/KernelSU/kernel" ]; then
+            cp -rf susfs4ksu/kernel_patches/KernelSU/kernel/* KernelSU/kernel/
           fi
-     
+
+          # CRITICAL: Add missing symbols to susfs.c
           echo "🔧 Adding missing symbols to fs/susfs.c..."
           cat >> fs/susfs.c << 'FIXEOF'
 
@@ -718,37 +737,30 @@ jobs:
           EXPORT_SYMBOL_GPL(fake_status_initialize_key);
           FIXEOF
 
-          # Save absolute path to patch before moving directories
-          SUSFS_KERNEL_PATCH="$(pwd)/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
-          SUSFS_PATCH="$(pwd)/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
-          echo "🔧 Applying SUSFS kernel patch..."
-          patch -p1 --fuzz=3 < "$SUSFS_PATCH" || true
-
-          echo "🔧 Applying SUSFS KERNEL PATCH..."
-          if patch -p1 < "$SUSFS_KERNEL_PATCH"; then
-            echo "✅ SUSFS patch successfully applied"
-          else
-            echo "⚠️ SUSFS patch failed — common on non-GKI"
+          # Ensure KernelSU Makefile includes susfs.o
+          if ! grep -q "susfs.o" KernelSU/kernel/Makefile 2>/dev/null; then
+            echo "obj-y += susfs.o" >> KernelSU/kernel/Makefile
           fi
-          # patches
-          curl -LSs "https://raw.githubusercontent.com/nebixts/kernel_patches/main/69_hide_stuff.patch" | patch -p1 -F 3 || true
 
-          echo "📦 Applying hide_stuff patch"
-          curl -LSs "https://raw.githubusercontent.com/nebixts/kernel_patches/main/69_hide_stuff.patch" | patch -p1 -F 3 || echo "⚠️ Hide stuff patch skipped"
-          
-          # Defconfig
+          # Update defconfig
           CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
-          echo "📝 Configuring $CONFIG_FILE"
+          echo "📝 Configuring $CONFIG_FILE with SUSFS options..."
+
+          # Remove existing KSU/SUSFS lines to avoid duplicates
+          sed -i '/^CONFIG_KSU/d' "$CONFIG_FILE"
+          sed -i '/^CONFIG_KPROBES/d' "$CONFIG_FILE"
+          sed -i '/^CONFIG_HAVE_KPROBES/d' "$CONFIG_FILE"
+          sed -i '/^CONFIG_KPROBE_EVENTS/d' "$CONFIG_FILE"
+          sed -i '/^CONFIG_KSU_SUSFS/d' "$CONFIG_FILE"
+
           cat >> "$CONFIG_FILE" << 'EOF'
-          echo "📝 Configuring $CONFIG_FILE with latest SUSFS options..."
-          grep -q "CONFIG_KSU=y" "$CONFIG_FILE" || {
-            cat >> "$CONFIG_FILE" << 'EOF'
+          # KernelSU
           CONFIG_KSU=y
-          CONFIG_KPM=n
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
           CONFIG_OVERLAY_FS=y
+          # SUSFS
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
@@ -766,19 +778,12 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_MAP=y
           CONFIG_KSU_SUSFS_SUS_SU=y
           CONFIG_KSU_SUSFS_INLINE_HOOK=y
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_TMPFS_POSIX_ACL=y
           EOF
-    
-          echo "✔ RESUKISU configs with SUSFS added"
-    
-          # Workspace cleaning
-          rm -rf ./susfs4oki ./kernel_patches ./SukiSU_patch
-    
-          echo "✅ Installed RESUKISU with SUSFS Successfully"
-          }
 
-          # Cleaning
           rm -rf ./susfs4ksu
-          echo "✅ Installed latest RESUKISU with SUSFS"
+          echo "✅ ReSukiSU (dev) with SUSFS ready for kernel 5.15"
           
       - name: "🔧 Setup Wild-KSU with SUSFS"
         if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'wild-ksu'
