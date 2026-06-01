@@ -672,46 +672,26 @@ jobs:
           
           echo "✅ Installed rKSU"
 
-      - name: "🔧 Setup ReSukiSU with SUSFS (Always Latest)"
+      - name: "🔧 Setup ReSukiSU with SUSFS"
         if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'resukisu'
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         run: |
           set -euo pipefail
 
-          echo "📦 Installing ReSukiSU (latest)..."
+          echo "📦 Installing ReSukiSU..."
           rm -rf ./KernelSU ./drivers/kernelsu ./susfs4ksu
-
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
           [ -d KernelSU ] || { echo "❌ ReSukiSU installation failed"; exit 1; }
 
-          echo "📦 Fetching latest SUSFS for 5.15..."
-          SUSFS_BRANCHES=$(git ls-remote --heads https://gitlab.com/simonpunk/susfs4ksu.git | grep -E "5\.15|android.*5\.15" | awk '{print $2}' | sed 's|refs/heads/||' | sort -V | tail -5)
-
-          SUSFS_BRANCH=""
-          for branch in $SUSFS_BRANCHES; do
-            echo "  Trying: $branch"
-            if git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b "$branch" ./susfs4ksu 2>/dev/null; then
-              SUSFS_BRANCH="$branch"
-              echo "  ✅ Using: $SUSFS_BRANCH"
-              break
-            else
-              rm -rf ./susfs4ksu
-            fi
-          done
-
-          if [ -z "$SUSFS_BRANCH" ]; then
-            echo "⚠️ No 5.15-specific branch found, trying latest master..."
-            git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git ./susfs4ksu || { echo "❌ SUSFS clone failed"; exit 1; }
-          fi
+          echo "📦 Cloning SUSFS (once)..."
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 ./susfs4ksu
 
           echo "📄 Applying SUSFS kernel patch..."
           SUSFS_PATCH="$(pwd)/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
-          if [ -f "$SUSFS_PATCH" ]; then
-            patch -p1 --fuzz=3 < "$SUSFS_PATCH" || true
+          if patch -p1 --fuzz=3 < "$SUSFS_PATCH"; then
+            echo "✅ SUSFS patch applied"
           else
-            echo "⚠️ Standard patch not found, searching for alternative..."
-            SUSFS_PATCH=$(find ./susfs4ksu -name "*gki*5.15*" -o -name "*android13*5.15*" | head -1)
-            [ -n "$SUSFS_PATCH" ] && patch -p1 --fuzz=3 < "$SUSFS_PATCH" || true
+            echo "⚠️ Patch had issues, continuing anyway"
           fi
 
           echo "📄 Copying SUSFS source files..."
@@ -721,31 +701,42 @@ jobs:
           [ -f susfs4ksu/kernel_patches/include/linux/susfs_def.h ] && \
             cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
 
+          # Copy integration files if they exist
           if [ -d "susfs4ksu/kernel_patches/KernelSU/kernel" ]; then
             cp -rf susfs4ksu/kernel_patches/KernelSU/kernel/* KernelSU/kernel/
           fi
 
+          # Create symlink safely (remove old first)
           rm -f drivers/kernelsu
           ln -sf ../KernelSU drivers/kernelsu
 
-          echo "🔧 Adding missing symbols to fs/susfs.c (no leading spaces)..."
-          printf '\n' >> fs/susfs.c
-          printf '/* === FIX: missing symbols for SUSFS + ReSukiSU === */\n' >> fs/susfs.c
-          printf 'int ksu_selinux_hide_enabled = 0;\n' >> fs/susfs.c
-          printf 'EXPORT_SYMBOL_GPL(ksu_selinux_hide_enabled);\n' >> fs/susfs.c
-          printf '\nvoid initialize_fake_status(void) { }\n' >> fs/susfs.c
-          printf 'EXPORT_SYMBOL_GPL(initialize_fake_status);\n' >> fs/susfs.c
-          printf '\nvoid *fake_status = NULL;\n' >> fs/susfs.c
-          printf 'EXPORT_SYMBOL_GPL(fake_status);\n' >> fs/susfs.c
-          printf '\nint fake_status_initialize_key = 0;\n' >> fs/susfs.c
-          printf 'EXPORT_SYMBOL_GPL(fake_status_initialize_key);\n' >> fs/susfs.c
+          # CRITICAL: Add missing symbols to susfs.c
+          echo "🔧 Adding missing symbols to fs/susfs.c..."
+          cat >> fs/susfs.c << 'FIXEOF'
 
+          /* === FIX: missing symbols for SUSFS + ReSukiSU === */
+          int ksu_selinux_hide_enabled = 0;
+          EXPORT_SYMBOL_GPL(ksu_selinux_hide_enabled);
+
+          void initialize_fake_status(void) { }
+          EXPORT_SYMBOL_GPL(initialize_fake_status);
+
+          void *fake_status = NULL;
+          EXPORT_SYMBOL_GPL(fake_status);
+
+          int fake_status_initialize_key = 0;
+          EXPORT_SYMBOL_GPL(fake_status_initialize_key);
+          FIXEOF
+
+          # Ensure KernelSU Makefile includes susfs.o
           if ! grep -q "susfs.o" KernelSU/kernel/Makefile 2>/dev/null; then
             echo "obj-y += susfs.o" >> KernelSU/kernel/Makefile
           fi
 
+          # Update defconfig (only once)
           CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
           echo "📝 Configuring $CONFIG_FILE..."
+          # Remove any existing KSU-related lines to avoid duplicates
           sed -i '/^CONFIG_KSU/d' "$CONFIG_FILE"
           sed -i '/^CONFIG_KPROBES/d' "$CONFIG_FILE"
           sed -i '/^CONFIG_HAVE_KPROBES/d' "$CONFIG_FILE"
@@ -753,12 +744,13 @@ jobs:
           sed -i '/^CONFIG_KSU_SUSFS/d' "$CONFIG_FILE"
 
           cat >> "$CONFIG_FILE" << 'EOF'
-          # KernelSU + SUSFS
+          # KernelSU
           CONFIG_KSU=y
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
           CONFIG_OVERLAY_FS=y
+          # SUSFS
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
@@ -781,7 +773,7 @@ jobs:
           EOF
 
           rm -rf ./susfs4ksu
-          echo "✅ ReSukiSU (latest drivers, $SUSFS_BRANCH) ready"
+          echo "✅ ReSukiSU with SUSFS ready"
           
       - name: "🔧 Setup Wild-KSU with SUSFS"
         if: matrix.variant == 'ksu' && github.event.inputs.ksuVariant == 'wild-ksu'
